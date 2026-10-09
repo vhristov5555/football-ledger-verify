@@ -1,0 +1,25 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      # Standard library only: nothing to install. The tests never touch the
+      # network (explorer responses are recorded fixtures).
+      - run: python -m unittest discover -s tests -v
+      - run: python verify.py tests/fixtures/2026-10-04.jsonl --skip-bitcoin
