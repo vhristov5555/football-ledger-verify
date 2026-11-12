@@ -49,12 +49,13 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 DEFAULT_BASE_URL = "https://football.vhristov.com/api/ledger"
 EXPLORERS: tuple[tuple[str, str], ...] = (
@@ -64,6 +65,14 @@ EXPLORERS: tuple[tuple[str, str], ...] = (
 NAME_PATTERN = re.compile(r"^(?:facts-(?:erratum-)?)?\d{4}-\d{2}-\d{2}$")
 USER_AGENT = f"football-ledger-verify/{__version__}"
 TIMEOUT_S = 30
+# The site answers HTTP 429 when one address sends more than 30 requests to
+# /api/ in 10 seconds, and keeps refusing for the next 10 seconds. A loop over
+# many days reaches that; one day (two files) never does. Wait it out a few
+# times, then give up as "undecided" — never as "failed".
+RETRY_STATUS = 429
+RETRY_ATTEMPTS = 3
+RETRY_WAIT_S = 11
+RETRY_WAIT_MAX_S = 60
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -290,13 +299,39 @@ def parse_proof(data: bytes) -> Proof:
 Fetcher = Callable[[str], bytes]
 
 
-def http_get(url: str) -> bytes:
+def _retry_wait(retry_after: str | None) -> int:
+    """Seconds to wait after a 429: the server's Retry-After if it is a sane
+    whole number of seconds, else the default."""
+    if retry_after is not None and retry_after.strip().isdigit():
+        asked = int(retry_after.strip())
+        if 0 < asked <= RETRY_WAIT_MAX_S:
+            return asked
+    return RETRY_WAIT_S
+
+
+def http_get(
+    url: str,
+    *,
+    opener: Callable[..., object] = urllib.request.urlopen,
+    sleep: Callable[[float], None] = time.sleep,
+) -> bytes:
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT_S) as response:
-            return bytes(response.read())
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise Undecided(f"GET {url}: {exc}") from exc
+    for attempt in range(RETRY_ATTEMPTS + 1):
+        try:
+            with opener(request, timeout=TIMEOUT_S) as response:  # type: ignore[attr-defined]
+                return bytes(response.read())
+        except urllib.error.HTTPError as exc:
+            if exc.code != RETRY_STATUS:
+                raise Undecided(f"GET {url}: {exc}") from exc
+            if attempt == RETRY_ATTEMPTS:
+                raise Undecided(
+                    f"GET {url}: still rate limited (HTTP 429) after "
+                    f"{RETRY_ATTEMPTS} waits; try again in a minute"
+                ) from exc
+            sleep(_retry_wait(exc.headers.get("Retry-After") if exc.headers else None))
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise Undecided(f"GET {url}: {exc}") from exc
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 def sha256d(data: bytes) -> bytes:

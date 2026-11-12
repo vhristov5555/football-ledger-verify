@@ -20,6 +20,11 @@ exercise. Measured 2026-10-09 on Python 3.12.
 | V11 | erratum `entries` not read (only `leaves`) | RED | test_real_erratum_uses_entries_not_leaves |
 | V12 | header count `n` not compared with the leaves | RED | test_header_count_must_match_the_leaves |
 | V13 | block time printed without the approximate wording | RED | test_real_day_verifies_with_both_explorers |
+| V14 | a 429 is treated like any other HTTP error (no wait, no retry) | RED | test_rate_limited_forever_is_undecided_after_the_last_wait, test_rate_limited_then_served_waits_and_returns_the_file, test_retry_after_is_used_only_when_it_is_a_sane_number_of_seconds |
+| V15 | every HTTP error is retried, not only 429 | RED | test_other_http_errors_are_undecided_at_once_without_waiting |
+| V16 | `Retry-After` accepted without the upper bound | RED | test_retry_after_is_used_only_when_it_is_a_sane_number_of_seconds |
+| V17 | gives up one wait early | RED | test_rate_limited_forever_is_undecided_after_the_last_wait |
+| V18 | `Retry-After` ignored | RED | test_retry_after_is_used_only_when_it_is_a_sane_number_of_seconds |
 
 Notes:
 
@@ -40,3 +45,7 @@ Notes:
   looks for `leaves` alone.
 - Network access is blocked during the suite: `verify.http_get` is
   replaced by a function that fails the test.
+- **V14–V18** (download retry, measured 2026-11-12 on Python 3.9 and against
+  the live site: 40 back-to-back requests gave 30 x `200` then 10 x `429` with
+  `retry-after: 10`). The tests drive the real `http_get` through a scripted
+  opener and a recorded `sleep`; nothing waits and nothing touches the network.

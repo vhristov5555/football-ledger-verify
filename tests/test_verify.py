@@ -27,6 +27,7 @@ import json
 import sys
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -52,6 +53,8 @@ def _no_network(url: str) -> bytes:
     raise AssertionError(f"test tried the network: {url}")
 
 
+# The real downloader, kept for the tests that drive it with a fake opener.
+REAL_HTTP_GET = verify.http_get
 verify.http_get = _no_network  # type: ignore[assignment]
 
 
@@ -324,6 +327,95 @@ class BitcoinTests(unittest.TestCase):
         self.assertEqual(code, verify.EXIT_OK, out)
         self.assertIn("the TIME is NOT verified", out)
         self.assertEqual(fetch.calls, [])  # type: ignore[attr-defined]
+
+
+class _Body:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    def __enter__(self) -> "_Body":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._data
+
+
+def _http_error(code: int, retry_after: str | None = None) -> urllib.error.HTTPError:
+    headers = {"Retry-After": retry_after} if retry_after is not None else {}
+    return urllib.error.HTTPError(SITE, code, "status", headers, io.BytesIO(b"error code: 1015"))  # type: ignore[arg-type]
+
+
+def scripted(*steps: object):
+    """An opener that plays ``steps`` in order: an exception is raised, bytes are served."""
+    queue = list(steps)
+    seen: list[str] = []
+
+    def opener(request, timeout):  # noqa: ANN001
+        seen.append(request.full_url)
+        step = queue.pop(0)
+        if isinstance(step, BaseException):
+            raise step
+        return _Body(step)  # type: ignore[arg-type]
+
+    opener.seen = seen  # type: ignore[attr-defined]
+    return opener
+
+
+class DownloadTests(unittest.TestCase):
+    URL = f"{SITE}/{DAY}.jsonl"
+
+    def test_rate_limited_then_served_waits_and_returns_the_file(self) -> None:
+        waits: list[float] = []
+        opener = scripted(_http_error(429), _http_error(429), RECORD)
+        data = REAL_HTTP_GET(self.URL, opener=opener, sleep=waits.append)
+        self.assertEqual(data, RECORD)
+        self.assertEqual(waits, [verify.RETRY_WAIT_S, verify.RETRY_WAIT_S])
+        self.assertEqual(opener.seen, [self.URL] * 3)
+
+    def test_rate_limited_forever_is_undecided_after_the_last_wait(self) -> None:
+        waits: list[float] = []
+        opener = scripted(*[_http_error(429)] * (verify.RETRY_ATTEMPTS + 1))
+        with self.assertRaises(verify.Undecided) as caught:
+            REAL_HTTP_GET(self.URL, opener=opener, sleep=waits.append)
+        self.assertIn("rate limited", str(caught.exception))
+        self.assertEqual(len(waits), verify.RETRY_ATTEMPTS)
+        self.assertEqual(len(opener.seen), verify.RETRY_ATTEMPTS + 1)
+
+    def test_other_http_errors_are_undecided_at_once_without_waiting(self) -> None:
+        for code in (404, 500, 503):
+            with self.subTest(code):
+                waits: list[float] = []
+                opener = scripted(_http_error(code))
+                with self.assertRaises(verify.Undecided) as caught:
+                    REAL_HTTP_GET(self.URL, opener=opener, sleep=waits.append)
+                self.assertIn(str(code), str(caught.exception))
+                self.assertEqual(waits, [])
+                self.assertEqual(len(opener.seen), 1)
+
+    def test_connection_error_is_undecided_at_once(self) -> None:
+        waits: list[float] = []
+        opener = scripted(urllib.error.URLError("connection refused"))
+        with self.assertRaises(verify.Undecided):
+            REAL_HTTP_GET(self.URL, opener=opener, sleep=waits.append)
+        self.assertEqual(waits, [])
+
+    def test_retry_after_is_used_only_when_it_is_a_sane_number_of_seconds(self) -> None:
+        cases = {"5": 5, " 20 ": 20, "60": 60, "61": verify.RETRY_WAIT_S, "0": verify.RETRY_WAIT_S,
+                 "-3": verify.RETRY_WAIT_S, "soon": verify.RETRY_WAIT_S, "": verify.RETRY_WAIT_S}
+        for header, expected in cases.items():
+            with self.subTest(header):
+                waits: list[float] = []
+                opener = scripted(_http_error(429, header), RECORD)
+                REAL_HTTP_GET(self.URL, opener=opener, sleep=waits.append)
+                self.assertEqual(waits, [expected])
+
+    def test_served_file_is_returned_without_waiting(self) -> None:
+        waits: list[float] = []
+        self.assertEqual(REAL_HTTP_GET(self.URL, opener=scripted(RECORD), sleep=waits.append), RECORD)
+        self.assertEqual(waits, [])
 
 
 class CliTests(unittest.TestCase):
