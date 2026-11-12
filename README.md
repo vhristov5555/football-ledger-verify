@@ -58,6 +58,13 @@ curl -O https://football.vhristov.com/api/ledger/2026-10-04.jsonl
 curl -O https://football.vhristov.com/api/ledger/2026-10-04.jsonl.btc.ots
 ```
 
+**Downloading many days.** The site allows 30 requests to `/api/` per 10
+seconds from one address; above that it answers HTTP 429 (body
+`error code: 1015`) for the next 10 seconds. One day is two files, so a
+single check never reaches it. A loop over the whole ledger does: pause about
+half a second between requests. `verify.py` waits and retries on a 429 by
+itself (three times, then exit `2`).
+
 ### The three commands
 
 ```sh
@@ -159,6 +166,12 @@ the defects the suite was measured to catch.
 `facts-erratum-ГГГГ-ММ-ДД` за корекциите. Печатът в биткойн блок се появява
 обикновено до няколко часа след записа за деня, понякога до ден; дотогава
 `<day>.jsonl.btc.ots` връща 404 — проверете по-ранен ден.
+
+**Теглене на много дни.** Сайтът допуска 30 заявки към `/api/` за 10 секунди
+от един адрес; над това отговаря с HTTP 429 (тяло `error code: 1015`) през
+следващите 10 секунди. Един ден е два файла и никога не стига дотам. Цикъл през
+целия журнал стига: оставете около половин секунда между заявките. `verify.py`
+сам изчаква и опитва пак при 429 (три пъти, после изход `2`).
 
 ### Трите команди
 
